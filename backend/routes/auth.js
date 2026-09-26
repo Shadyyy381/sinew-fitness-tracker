@@ -91,4 +91,34 @@ router.get("/me", requireAuth, async (req, res) => {
   }
 });
 
+router.patch("/goals", requireAuth, async (req, res) => {
+  const steps = Number(req.body.daily_steps_goal);
+  const water = Number(req.body.daily_water_goal_ml);
+  const sleep = Number(req.body.daily_sleep_goal_hours);
+
+  if (!Number.isFinite(steps) || steps < 1000 || steps > 50000) {
+    return res.status(400).json({ error: "Step goal must be between 1,000 and 50,000." });
+  }
+  if (!Number.isFinite(water) || water < 500 || water > 10000) {
+    return res.status(400).json({ error: "Water goal must be between 500 and 10,000 ml." });
+  }
+  if (!Number.isFinite(sleep) || sleep < 3 || sleep > 14) {
+    return res.status(400).json({ error: "Sleep goal must be between 3 and 14 hours." });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE users
+       SET daily_steps_goal = $1, daily_water_goal_ml = $2, daily_sleep_goal_hours = $3
+       WHERE id = $4
+       RETURNING id, name, email, daily_water_goal_ml, daily_steps_goal, daily_sleep_goal_hours`,
+      [steps, water, sleep, req.userId]
+    );
+    res.json({ user: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not update goals." });
+  }
+});
+
 module.exports = router;

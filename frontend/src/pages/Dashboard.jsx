@@ -1,30 +1,30 @@
 import { useEffect, useState, useCallback } from "react";
 import api from "../api";
 import { useAuth } from "../context/AuthContext.jsx";
+import { fullDateLabel } from "../utils/dates";
+import Sidebar from "../components/Sidebar.jsx";
 import StatCard from "../components/StatCard.jsx";
 import QuickLog from "../components/QuickLog.jsx";
 import WeeklyChart from "../components/WeeklyChart.jsx";
+import ScoreCard from "../components/ScoreCard.jsx";
+import RecentEntries from "../components/RecentEntries.jsx";
 
 const METRICS = ["walk", "water", "sleep"];
 
 export default function Dashboard() {
-  const { user, logout } = useAuth();
-  const [today, setToday] = useState({});
-  const [history, setHistory] = useState([]);
+  const { user } = useAuth();
+  const [overview, setOverview] = useState(null);
   const [recentLogs, setRecentLogs] = useState([]);
   const [activeMetric, setActiveMetric] = useState("walk");
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    const [summaryRes, logsRes] = await Promise.all([
-      api.get("/logs/summary/weekly?days=7"),
+    const [overviewRes, logsRes] = await Promise.all([
+      api.get("/logs/summary/overview?days=7"),
       api.get("/logs?days=14"),
     ]);
-    const todayMap = {};
-    summaryRes.data.today.forEach((row) => (todayMap[row.type] = row.total));
-    setToday(todayMap);
-    setHistory(summaryRes.data.history);
-    setRecentLogs(logsRes.data.logs.slice(0, 8));
+    setOverview(overviewRes.data);
+    setRecentLogs(logsRes.data.logs.slice(0, 10));
     setLoading(false);
   }, []);
 
@@ -42,51 +42,50 @@ export default function Dashboard() {
     await refresh();
   }
 
-  if (loading) return <div className="page-loading">Loading Sinew…</div>;
+  async function handleEdit(id, value) {
+    await api.put(`/logs/${id}`, { value });
+    await refresh();
+  }
 
-  const metricHistory = history.filter((h) => h.type === activeMetric);
+  if (loading || !overview) return <div className="page-loading">Loading Sinew…</div>;
+
+  const metricHistory = overview.history.filter((h) => h.type === activeMetric);
+  const firstName = user?.name?.split(" ")[0] || "there";
 
   return (
     <div className="dashboard">
-      <aside className="rail">
-        <div className="rail-mark">SINEW</div>
-        <div className="rail-user">
-          <div className="rail-user-name">{user?.name}</div>
-          <div className="rail-user-email">{user?.email}</div>
-        </div>
-        <button className="btn-ghost" onClick={logout}>
-          Log out
-        </button>
-      </aside>
+      <Sidebar />
 
       <main className="main">
         <header className="main-header">
-          <h1>Today</h1>
-          <p className="main-sub">Log an entry, watch the week take shape.</p>
+          <h1>Good to see you, {firstName} 👋</h1>
+          <p className="main-sub">{fullDateLabel()}</p>
         </header>
+
+        <ScoreCard score={overview.score} streak={overview.streak} insight={overview.insight} />
 
         <QuickLog onLog={handleLog} />
 
         <section className="stat-grid">
           <StatCard
             label="Steps"
-            value={today.walk || 0}
+            value={overview.today.walk || 0}
             unit="steps"
-            goal={user?.daily_steps_goal}
+            goal={overview.goals.walk}
             accent="#FF6B35"
           />
           <StatCard
             label="Water"
-            value={today.water || 0}
+            value={overview.today.water || 0}
             unit="ml"
-            goal={user?.daily_water_goal_ml}
+            goal={overview.goals.water}
             accent="#2DD4BF"
           />
           <StatCard
             label="Sleep"
-            value={today.sleep || 0}
+            value={overview.today.sleep || 0}
             unit="hrs"
-            goal={Number(user?.daily_sleep_goal_hours)}
+            goal={overview.goals.sleep}
             accent="#C9A5FF"
           />
         </section>
@@ -108,24 +107,7 @@ export default function Dashboard() {
 
         <section className="recent-section">
           <span className="stat-label">Recent entries</span>
-          <ul className="recent-list">
-            {recentLogs.length === 0 && (
-              <li className="recent-empty">Nothing logged yet — add your first entry above.</li>
-            )}
-            {recentLogs.map((log) => (
-              <li key={log.id} className="recent-item">
-                <span className={`recent-dot dot-${log.type}`} />
-                <span className="recent-type">{log.type}</span>
-                <span className="recent-value">
-                  {log.value} {log.type === "walk" ? "steps" : log.type === "water" ? "ml" : "hrs"}
-                </span>
-                <span className="recent-date">{log.logged_at}</span>
-                <button className="recent-delete" onClick={() => handleDelete(log.id)}>
-                  Remove
-                </button>
-              </li>
-            ))}
-          </ul>
+          <RecentEntries logs={recentLogs} onDelete={handleDelete} onEdit={handleEdit} />
         </section>
       </main>
     </div>

@@ -1,5 +1,7 @@
 export default function StatCard({ label, value, unit, goal, accent }) {
   const pct = goal ? Math.min(100, Math.round((value / goal) * 100)) : null;
+  const remaining = goal ? Math.max(0, goal - value) : null;
+  const metGoal = goal && value >= goal;
 
   return (
     <div className="stat-card" style={{ "--accent": accent }}>
@@ -9,6 +11,7 @@ export default function StatCard({ label, value, unit, goal, accent }) {
       </div>
       <div className="stat-value">
         {value.toLocaleString()}
+        {goal ? <span className="stat-of-goal"> / {goal.toLocaleString()}</span> : null}
         <span className="stat-unit">{unit}</span>
       </div>
       {goal ? (
@@ -16,7 +19,11 @@ export default function StatCard({ label, value, unit, goal, accent }) {
           <div className="stat-bar-track">
             <div className="stat-bar-fill" style={{ width: `${pct}%` }} />
           </div>
-          <div className="stat-goal">of {goal.toLocaleString()} {unit} goal</div>
+          <div className="stat-goal">
+            {metGoal
+              ? "Goal reached today 🎉"
+              : `${remaining.toLocaleString()} ${unit} more to reach today's goal`}
+          </div>
         </>
       ) : (
         <div className="stat-goal">no entries yet today</div>

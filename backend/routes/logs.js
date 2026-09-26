@@ -5,6 +5,23 @@ const requireAuth = require("../middleware/authMiddleware");
 const router = express.Router();
 const VALID_TYPES = ["walk", "water", "sleep"];
 
+// Sane real-world bounds per metric, enforced both here and in the UI.
+const LIMITS = {
+  walk: { min: 1, max: 100000, label: "Steps must be between 1 and 100,000." },
+  water: { min: 1, max: 10000, label: "Water must be between 1 and 10,000 ml." },
+  sleep: { min: 0.25, max: 24, label: "Sleep must be between 0.25 and 24 hours." },
+};
+
+function validateValue(type, value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return { error: "Value must be a number." };
+  const limit = LIMITS[type];
+  if (numericValue < limit.min || numericValue > limit.max) {
+    return { error: limit.label };
+  }
+  return { numericValue };
+}
+
 router.use(requireAuth);
 
 // Create a log entry
@@ -14,9 +31,9 @@ router.post("/", async (req, res) => {
   if (!VALID_TYPES.includes(type)) {
     return res.status(400).json({ error: "Type must be one of: walk, water, sleep." });
   }
-  const numericValue = Number(value);
-  if (!numericValue || numericValue <= 0) {
-    return res.status(400).json({ error: "Value must be a positive number." });
+  const { numericValue, error } = validateValue(type, value);
+  if (error) {
+    return res.status(400).json({ error });
   }
 
   try {
@@ -57,6 +74,32 @@ router.get("/", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not load entries." });
+  }
+});
+
+// Edit an existing log entry's value (only if it belongs to the caller)
+router.put("/:id", async (req, res) => {
+  const { value } = req.body;
+  try {
+    const existing = await pool.query(
+      "SELECT type FROM logs WHERE id = $1 AND user_id = $2",
+      [req.params.id, req.userId]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Entry not found." });
+    }
+    const { numericValue, error } = validateValue(existing.rows[0].type, value);
+    if (error) {
+      return res.status(400).json({ error });
+    }
+    const result = await pool.query(
+      "UPDATE logs SET value = $1 WHERE id = $2 AND user_id = $3 RETURNING id, type, value, logged_at",
+      [numericValue, req.params.id, req.userId]
+    );
+    res.json({ log: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not update that entry." });
   }
 });
 
@@ -102,6 +145,110 @@ router.get("/summary/weekly", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not load summary." });
+  }
+});
+
+// One call that powers the dashboard: today's totals, goal-completion score,
+// logging streak, and a plain-language insight comparing this week to last week.
+router.get("/summary/overview", async (req, res) => {
+  const days = Number(req.query.days) || 7;
+  try {
+    const userResult = await pool.query(
+      `SELECT daily_water_goal_ml, daily_steps_goal, daily_sleep_goal_hours
+       FROM users WHERE id = $1`,
+      [req.userId]
+    );
+    const goals = userResult.rows[0];
+
+    const historyResult = await pool.query(
+      `SELECT logged_at, type, SUM(value)::float AS total
+       FROM logs
+       WHERE user_id = $1 AND logged_at >= CURRENT_DATE - ($2 || ' days')::interval
+       GROUP BY logged_at, type
+       ORDER BY logged_at ASC`,
+      [req.userId, days]
+    );
+
+    const todayResult = await pool.query(
+      `SELECT type, SUM(value)::float AS total
+       FROM logs WHERE user_id = $1 AND logged_at = CURRENT_DATE
+       GROUP BY type`,
+      [req.userId]
+    );
+    const today = { walk: 0, water: 0, sleep: 0 };
+    todayResult.rows.forEach((row) => (today[row.type] = row.total));
+
+    // Score: average of each metric's goal-completion %, capped at 100.
+    const goalFor = { walk: goals.daily_steps_goal, water: goals.daily_water_goal_ml, sleep: Number(goals.daily_sleep_goal_hours) };
+    const pct = (type) => Math.min(100, Math.round((today[type] / goalFor[type]) * 100));
+    const score = Math.round((pct("walk") + pct("water") + pct("sleep")) / 3);
+
+    // Streak: consecutive days (ending today or yesterday) with at least one entry.
+    const streakDaysResult = await pool.query(
+      `SELECT DISTINCT logged_at FROM logs
+       WHERE user_id = $1 AND logged_at >= CURRENT_DATE - INTERVAL '90 days'
+       ORDER BY logged_at DESC`,
+      [req.userId]
+    );
+    const loggedDates = streakDaysResult.rows.map((r) => r.logged_at.toISOString().slice(0, 10));
+    let streak = 0;
+    if (loggedDates.length > 0) {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const oneDayMs = 24 * 60 * 60 * 1000;
+      const mostRecent = new Date(loggedDates[0]);
+      const gapFromToday = Math.round((new Date(todayStr) - mostRecent) / oneDayMs);
+      if (gapFromToday <= 1) {
+        streak = 1;
+        for (let i = 1; i < loggedDates.length; i++) {
+          const prev = new Date(loggedDates[i - 1]);
+          const curr = new Date(loggedDates[i]);
+          if (Math.round((prev - curr) / oneDayMs) === 1) {
+            streak++;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+
+    // Insight: compare this week's daily average per metric to the prior week's.
+    const weekAvgResult = await pool.query(
+      `SELECT
+         type,
+         AVG(value) FILTER (WHERE logged_at >= CURRENT_DATE - INTERVAL '7 days') AS this_week,
+         AVG(value) FILTER (WHERE logged_at < CURRENT_DATE - INTERVAL '7 days' AND logged_at >= CURRENT_DATE - INTERVAL '14 days') AS last_week
+       FROM logs
+       WHERE user_id = $1 AND logged_at >= CURRENT_DATE - INTERVAL '14 days'
+       GROUP BY type`,
+      [req.userId]
+    );
+    const LABELS = { walk: "steps", water: "water intake", sleep: "sleep" };
+    let insight = "Keep logging daily to unlock personalized insights.";
+    let bestChange = 0;
+    weekAvgResult.rows.forEach((row) => {
+      const thisWeek = Number(row.this_week) || 0;
+      const lastWeek = Number(row.last_week) || 0;
+      if (lastWeek > 0 && thisWeek > 0) {
+        const change = ((thisWeek - lastWeek) / lastWeek) * 100;
+        if (Math.abs(change) > Math.abs(bestChange)) {
+          bestChange = change;
+          const direction = change >= 0 ? "up" : "down";
+          insight = `Your ${LABELS[row.type]} is ${direction} ${Math.abs(Math.round(change))}% compared to last week.`;
+        }
+      }
+    });
+
+    res.json({
+      today,
+      goals: goalFor,
+      history: historyResult.rows,
+      score,
+      streak,
+      insight,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not load overview." });
   }
 });
 
